@@ -42,6 +42,11 @@ else
 fi
 echo ""
 
+# Stop VLC
+echo "Stopping VLC Player..."
+pkill -f "vlc.*rtsp://localhost:8554/glasses" 2>/dev/null && echo "✓ VLC stopped" || echo "  (not running)"
+echo ""
+
 # Stop any synthetic publishers
 pkill -f "synthetic_publisher" 2>/dev/null && echo "✓ Synthetic publisher stopped" || true
 pkill -f "ffmpeg.*testsrc2" 2>/dev/null && echo "✓ Test streams stopped" || true

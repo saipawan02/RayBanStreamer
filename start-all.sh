@@ -163,6 +163,33 @@ else
 fi
 echo ""
 
+# 4. Start VLC to view the stream
+echo "=================================================="
+echo "Starting VLC Player (stream viewer)..."
+echo "=================================================="
+
+if ! command -v vlc &> /dev/null; then
+    echo -e "${YELLOW}⚠ VLC not found - install with: sudo apt install vlc${NC}"
+else
+    # Check if VLC is already running with this stream
+    if pgrep -f "vlc.*rtsp://localhost:8554/glasses" > /dev/null; then
+        echo -e "${YELLOW}⚠ VLC already viewing stream${NC}"
+    else
+        # Start VLC in background to view the RTSP stream
+        vlc rtsp://localhost:8554/glasses > /dev/null 2>&1 &
+        VLC_PID=$!
+        sleep 1
+
+        if ps -p $VLC_PID > /dev/null; then
+            echo -e "${GREEN}✓ VLC started (PID: $VLC_PID)${NC}"
+            echo "  Viewing: rtsp://localhost:8554/glasses"
+        else
+            echo -e "${YELLOW}⚠ VLC may not have started (this is OK if no stream yet)${NC}"
+        fi
+    fi
+fi
+echo ""
+
 # Get local IP address
 LOCAL_IP=$(hostname -I | awk '{print $1}')
 
@@ -175,6 +202,7 @@ echo "Services:"
 echo -e "  ${GREEN}✓${NC} MediaMTX       - Port 8554 (RTSP), 8890 (SRT)"
 echo -e "  ${GREEN}✓${NC} Telemetry      - Port 8000 (WebSocket)"
 echo -e "  ${GREEN}✓${NC} Relay          - Port 8001 (WebSocket)"
+echo -e "  ${GREEN}✓${NC} VLC Player     - Viewing RTSP stream"
 echo ""
 echo "=================================================="
 echo "  📱 ANDROID APP CONFIGURATION"
