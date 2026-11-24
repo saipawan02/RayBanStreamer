@@ -78,10 +78,12 @@ class SettingsManager(private val context: Context) {
      * Update just the server configuration
      */
     suspend fun updateServerConfig(host: String, wsToken: String, srtPassphrase: String = "") {
+        android.util.Log.i("SettingsManager", "Updating server config: host=$host, token=${if(wsToken.isNotEmpty()) "***" else "empty"}")
         context.dataStore.edit { prefs ->
             prefs[SERVER_HOST] = host
             prefs[WS_TOKEN] = wsToken
             prefs[SRT_PASSPHRASE] = srtPassphrase
         }
+        android.util.Log.i("SettingsManager", "Server config saved to DataStore")
     }
 }

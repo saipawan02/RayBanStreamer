@@ -79,7 +79,9 @@ class MediaUplink(
 
         // Determine protocol based on host
         val protocol = if (serverHost.contains(".trycloudflare.com")) "wss" else "ws"
-        val url = "$protocol://$serverHost/media/$sessionId?token=$token"
+        val url = "$protocol://$serverHost:8001/media/$sessionId?token=$token"
+
+        Log.i(TAG, "Connecting to $url")
 
         val request = Request.Builder()
             .url(url)

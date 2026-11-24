@@ -44,7 +44,7 @@ import java.util.UUID
 class CameraManager(
     private val context: Context,
     private val coroutineScope: CoroutineScope,
-    private val settings: Settings = Settings.DEFAULT,
+    private var settings: Settings = Settings.DEFAULT,
     private val clocks: Clocks = SystemClocks()
 ) {
     private val TAG = "CameraManager"
@@ -84,6 +84,31 @@ class CameraManager(
         // Initialize telemetry uplink if server is configured
         if (settings.serverHost.isNotEmpty() && settings.wsToken.isNotEmpty()) {
             initializeTelemetry()
+        }
+    }
+
+    /**
+     * Update settings and reinitialize uplinks
+     * Call this after user changes server configuration
+     */
+    fun updateSettings(newSettings: Settings) {
+        Log.i(TAG, "Updating settings: host=${newSettings.serverHost.take(20)}, token=${if(newSettings.wsToken.isNotEmpty()) "***" else "empty"}")
+
+        // Stop existing uplinks
+        telemetryUplink?.stop()
+        mediaUplink?.stop()
+        telemetryUplink = null
+        mediaUplink = null
+
+        // Update settings
+        settings = newSettings
+
+        // Reinitialize uplinks if configured
+        if (settings.serverHost.isNotEmpty() && settings.wsToken.isNotEmpty()) {
+            initializeTelemetry()
+            Log.i(TAG, "Settings updated and uplinks reinitialized")
+        } else {
+            Log.w(TAG, "Settings updated but server not configured")
         }
     }
 

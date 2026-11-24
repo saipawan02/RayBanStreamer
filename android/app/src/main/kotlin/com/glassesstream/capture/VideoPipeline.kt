@@ -65,8 +65,17 @@ class VideoPipeline(
 
     private fun processFrame(frame: VideoFrame) {
         // Copy buffer immediately - SDK may reuse it after callback
-        val buffer = frame.buffer
-        val data = ByteArray(buffer.remaining())
+        // Use duplicate() to avoid modifying SDK's buffer position
+        val buffer = frame.buffer.duplicate()
+        buffer.position(0)  // Start from beginning of this duplicate
+
+        val size = buffer.limit()
+        if (size == 0) {
+            Log.w(TAG, "Received frame with 0 bytes")
+            return
+        }
+
+        val data = ByteArray(size)
         buffer.get(data)
 
         // Check if compressed HEVC or raw YUV

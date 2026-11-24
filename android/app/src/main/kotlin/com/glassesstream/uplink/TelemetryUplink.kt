@@ -42,6 +42,7 @@ class TelemetryUplink(
     private val json = Json {
         ignoreUnknownKeys = true
         encodeDefaults = true
+        classDiscriminator = "_class"  // Avoid conflict with protocol's "type" field
     }
 
     sealed class ConnectionState {

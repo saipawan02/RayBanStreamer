@@ -69,8 +69,18 @@ class MainActivity : AppCompatActivity() {
         manager = WearablesManager(this, lifecycleScope)
 
         // Initialize CameraManager with default settings
-        // Settings will be loaded and applied when user saves them
         cameraManager = CameraManager(this, lifecycleScope, Settings.DEFAULT)
+
+        // Load settings from DataStore and update CameraManager
+        lifecycleScope.launch {
+            val loadedSettings = settingsManager.settingsFlow.first()
+            if (loadedSettings.serverHost.isNotEmpty()) {
+                cameraManager.updateSettings(loadedSettings)
+                android.util.Log.i("MainActivity", "Settings loaded and applied: host=${loadedSettings.serverHost.take(20)}")
+            } else {
+                android.util.Log.i("MainActivity", "No saved settings found, using defaults")
+            }
+        }
 
         // SUPER SIMPLE LAYOUT
         val layout = LinearLayout(this).apply {
@@ -108,8 +118,15 @@ class MainActivity : AppCompatActivity() {
                 lifecycleScope.launch {
                     val host = serverHostInput.text.toString()
                     val token = wsTokenInput.text.toString()
+                    android.util.Log.i("MainActivity", "Saving settings: host=$host, token=${if(token.isNotEmpty()) "***" else "empty"}")
                     settingsManager.updateServerConfig(host, token)
-                    Toast.makeText(this@MainActivity, "Settings saved! Restart session to apply.", Toast.LENGTH_SHORT).show()
+
+                    // Update CameraManager with new settings
+                    val newSettings = settingsManager.settingsFlow.first()
+                    cameraManager.updateSettings(newSettings)
+                    android.util.Log.i("MainActivity", "Settings applied to CameraManager")
+
+                    Toast.makeText(this@MainActivity, "Settings saved and applied!", Toast.LENGTH_SHORT).show()
                 }
             }
             layout.addView(this)

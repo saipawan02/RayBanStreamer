@@ -80,9 +80,10 @@ async def media_websocket(
                 log.warning(f"Frame too short: {len(data)} bytes")
                 continue
 
-            # Parse header
-            stream_type, flags, _, _, pts_us, payload_len = struct.unpack(
-                '<BBHxQLI',  # Little-endian: byte, byte, short, padding, int64, int32
+            # Parse header (16 bytes total)
+            # Format: stream_type(1), flags(1), reserved(2), pts_us(8), payload_len(4)
+            stream_type, flags, reserved, pts_us, payload_len = struct.unpack(
+                '<BBHqI',  # Little-endian: byte, byte, short, int64, uint32
                 data[:16]
             )
 
