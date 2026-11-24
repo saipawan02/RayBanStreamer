@@ -1,0 +1,17 @@
+# TECH-04 section 10
+[Unit]
+Description=Glasses telemetry receiver
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=glasses
+EnvironmentFile=/etc/glasses/telemetry.env
+WorkingDirectory=/opt/glasses/server/telemetry
+ExecStart=/opt/glasses/venv/bin/uvicorn app.main:app --host ${TELEMETRY_BIND} --port 8000 --ws-max-size 1048576
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+
+[Install]
+WantedBy=multi-user.target

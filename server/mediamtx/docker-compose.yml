@@ -1,0 +1,11 @@
+# TECH-03 section 3.1. Run: docker compose up -d   (from server/mediamtx/)
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest     # pin a specific version tag once working, then record it in DECISIONS.md
+    container_name: mediamtx
+    restart: unless-stopped
+    network_mode: host                    # simplest for UDP (SRT) and RTSP
+    env_file: .env                        # holds MTX_PATHS_GLASSES_SRTPUBLISHPASSPHRASE (never committed)
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+      - ${DATA_ROOT:-/srv/glasses}/recordings:/recordings

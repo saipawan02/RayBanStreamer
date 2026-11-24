@@ -1,0 +1,32 @@
+# TECH-03 section 3.2. Keys under pathDefaults need MediaMTX >= the release that introduced them;
+# if one is rejected at startup, compare with the bundled mediamtx.yml for your version (DECISIONS.md).
+# The SRT passphrase is NOT in this file: it comes from the environment (see .env.example).
+logLevel: info
+
+# turn off everything not needed
+api: no
+metrics: no
+rtmp: no
+hls: no
+webrtc: no
+
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp]            # avoids UDP RTP on 8000/8001 entirely (TECH-03 3.2 last note)
+
+srt: yes
+srtAddress: :8890
+
+pathDefaults:
+  record: yes
+  recordPath: /recordings/%path/%Y-%m-%d_%H-%M-%S-%f      # extension is added automatically
+  recordFormat: fmp4
+  recordPartDuration: 1s                                   # also the recovery point objective
+  recordMaxPartSize: 50M
+  recordSegmentDuration: 15m
+  recordDeleteAfter: 0s                                    # 0s disables deletion; set e.g. 168h to expire
+
+paths:
+  glasses:
+    source: publisher
+    # srtPublishPassphrase is injected via env var MTX_PATHS_GLASSES_SRTPUBLISHPASSPHRASE [A: confirm name for your version]

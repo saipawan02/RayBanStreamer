@@ -1,0 +1,54 @@
+# secrets
+.env
+*.env
+!.env.example
+!*.env.example
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.keystore
+*-backup/
+.gradle/
+build/
+*.apk
+*.aab
+
+# data
+/srv/
+*.parquet
+!tests/**/*.parquet
+/tmp/
+
+# logs and runtime
+*.log
+*.pid
+nohup.out
+
+# screenshots and images
+Screenshot*.png
+*.jpg
+*.jpeg
+!refdocs/**/*.png
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
