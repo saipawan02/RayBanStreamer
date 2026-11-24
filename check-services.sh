@@ -70,8 +70,8 @@ echo "=================================================="
 echo ""
 
 # Check data directories
-DATA_DIR="/tmp/glasses/data"
-REC_DIR="/tmp/glasses/recordings/glasses"
+DATA_DIR="$(dirname "$0")/data/sessions"
+REC_DIR="$(dirname "$0")/data/recordings/glasses"
 
 echo "Session data: $DATA_DIR"
 if [ -d "$DATA_DIR" ]; then

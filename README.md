@@ -128,7 +128,7 @@ sudo apt install python3 python3-venv python3-pip
 
 **Telemetry Server** (`server/telemetry/.env`):
 ```env
-DATA_ROOT=/tmp/glasses
+DATA_ROOT=./data
 TELEMETRY_TOKEN=test-token-change-me-in-production
 TELEMETRY_BIND=0.0.0.0
 PART_SECONDS=5
@@ -138,7 +138,7 @@ LOG_LEVEL=info
 
 **MediaMTX** (`server/mediamtx/.env`):
 ```env
-DATA_ROOT=/tmp/glasses
+DATA_ROOT=./data
 # Passphrase disabled for local testing
 ```
 
@@ -189,7 +189,7 @@ cd server/telemetry
 
 **Logs**: Shown in terminal
 
-**Data location**: `/tmp/glasses/data/<session_id>/`
+**Data location**: `./data/data/<session_id>/`
 
 ### Relay Service (Port 8001)
 
@@ -230,7 +230,7 @@ You should see animated color bars with a 440Hz tone.
 python tools/synthetic_imu_client.py --host localhost --token test-token-change-me-in-production --rate 60 --seconds 60
 
 # Check data was written
-ls -lah /tmp/glasses/data/
+ls -lah ./data/data/
 ```
 
 ### Monitor Live Session
@@ -257,7 +257,7 @@ curl http://localhost:8001/health
 
 Each streaming session creates:
 ```
-/tmp/glasses/data/<session_id>/
+./data/data/<session_id>/
 ├── session.json          # Metadata and settings
 ├── events.parquet        # Event log
 └── imu/
@@ -270,7 +270,7 @@ Each streaming session creates:
 
 MediaMTX records to:
 ```
-/tmp/glasses/recordings/glasses/
+./data/recordings/glasses/
 ├── 2026-11-24_23-45-00-123456.mp4
 └── ...
 ```

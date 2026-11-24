@@ -29,6 +29,7 @@ gradle-wrapper.jar
 
 # data
 /srv/
+/data/
 *.parquet
 !tests/**/*.parquet
 /tmp/
