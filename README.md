@@ -40,6 +40,8 @@ This starts:
 - Telemetry receiver (IMU data)
 - Relay service (video/audio)
 
+**The script will display your local IP address** - save this for the next step!
+
 ### 2. Install Android App
 
 ```bash
@@ -49,15 +51,25 @@ cd android
 
 ### 3. Configure App on Phone
 
-Find your machine's IP:
+**Important:** The app needs your machine's **local IP address** (not `localhost`).
+
+The `start-all.sh` script displays your IP when starting services, or find it manually:
+
 ```bash
-ip addr show | grep "inet " | grep -v 127.0.0.1
+hostname -I | awk '{print $1}'
+# Example output: 192.168.1.28
 ```
 
-In the app:
-- **Server Host**: Your machine's IP (e.g., `192.168.1.28`)
+**In the RayBanStreamer app:**
+- **Server Host**: `192.168.1.28` (use YOUR actual IP, no port number)
 - **WebSocket Token**: `test-token-change-me-in-production`
 - Tap **SAVE SETTINGS**
+
+The app will automatically connect to:
+- Telemetry (IMU): `ws://192.168.1.28:8000/ingest/<session_id>`
+- Media (Video): `ws://192.168.1.28:8001/media/<session_id>`
+
+**Note:** Your phone and laptop must be on the same WiFi network.
 
 ### 4. Stream from Glasses
 
