@@ -24,6 +24,8 @@ android/local.properties
 build/
 *.apk
 *.aab
+gradle-wrapper.jar
+**/gradle/wrapper/*.zip
 
 # data
 /srv/
