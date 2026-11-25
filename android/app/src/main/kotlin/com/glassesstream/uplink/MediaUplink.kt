@@ -40,7 +40,7 @@ class MediaUplink(
 
     companion object {
         const val STREAM_TYPE_VIDEO_HEVC = 1.toByte()
-        const val STREAM_TYPE_AUDIO_AAC = 2.toByte()
+        const val STREAM_TYPE_AUDIO_PCM = 2.toByte()  // Changed from AAC to PCM (DAT delivers PCM)
         const val FLAG_KEYFRAME = 1.toByte()
     }
 
@@ -153,6 +153,7 @@ class MediaUplink(
 
     /**
      * Send an audio frame using Plan B binary protocol
+     * Sends raw 16-bit PCM audio from DAT (no encoding)
      */
     fun sendAudioFrame(data: ByteArray, presentationTimeUs: Long) {
         val ws = webSocket ?: return
@@ -163,7 +164,7 @@ class MediaUplink(
 
         try {
             val frame = buildBinaryFrame(
-                streamType = STREAM_TYPE_AUDIO_AAC,
+                streamType = STREAM_TYPE_AUDIO_PCM,  // PCM, not AAC
                 isKeyframe = false,
                 presentationTimeUs = presentationTimeUs,
                 payload = data

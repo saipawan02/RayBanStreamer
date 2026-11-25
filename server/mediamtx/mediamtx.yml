@@ -4,9 +4,11 @@
 logLevel: info
 
 # turn off everything not needed
-api: no
+api: yes
+apiAddress: :9997
 metrics: no
-rtmp: no
+rtmp: yes
+rtmpAddress: :1935
 hls: no
 webrtc: no
 
@@ -29,4 +31,5 @@ pathDefaults:
 paths:
   glasses:
     source: publisher
+    # FFmpeg publishes via RTMP (more reliable than UDP for our use case)
     # srtPublishPassphrase is injected via env var MTX_PATHS_GLASSES_SRTPUBLISHPASSPHRASE [A: confirm name for your version]

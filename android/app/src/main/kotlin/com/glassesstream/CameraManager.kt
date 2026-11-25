@@ -1,8 +1,15 @@
 package com.glassesstream
 
 import android.content.Context
+import android.media.AudioDeviceInfo
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.os.Build
 import android.util.Log
 import android.view.Surface
+import androidx.annotation.RequiresApi
 import com.glassesstream.capture.AudioPipeline
 import com.glassesstream.capture.MotionPipeline
 import com.glassesstream.capture.VideoPipeline
@@ -17,10 +24,14 @@ import com.meta.wearable.dat.camera.Camera
 import com.meta.wearable.dat.camera.Stream
 import com.meta.wearable.dat.camera.addCamera
 import com.meta.wearable.dat.camera.types.*
+import com.meta.wearable.dat.camera.types.AudioCodec
+import com.meta.wearable.dat.camera.types.AudioSampleRate
 import com.meta.wearable.dat.core.Wearables
 import com.meta.wearable.dat.core.selectors.AutoDeviceSelector
 import com.meta.wearable.dat.core.session.DeviceSession
 import com.meta.wearable.dat.core.session.DeviceSessionState
+import com.meta.wearable.dat.core.types.Permission
+import com.meta.wearable.dat.core.types.PermissionStatus
 import com.meta.wearable.dat.motion.Motion
 import com.meta.wearable.dat.motion.addMotion
 import com.meta.wearable.dat.motion.types.MotionConfiguration
@@ -64,6 +75,12 @@ class CameraManager(
     private var telemetryUplink: TelemetryUplink? = null
     private var mediaUplink: MediaUplink? = null
 
+    // Collector jobs for proper cancellation
+    private var videoCollectorJob: kotlinx.coroutines.Job? = null
+    private var audioCollectorJob: kotlinx.coroutines.Job? = null
+    private var audioPipelineJob: kotlinx.coroutines.Job? = null
+    private var videoPipelineJob: kotlinx.coroutines.Job? = null
+
     private val _status = MutableStateFlow<String>("Ready to stream")
     val status: StateFlow<String> = _status.asStateFlow()
 
@@ -79,6 +96,16 @@ class CameraManager(
     private var videoSurface: Surface? = null
     private var hevcDecoder: HevcDecoder? = null
     private var eventSeq = 0
+
+    // Upload toggles (all streams active, these control server upload)
+    private var uploadVideo = true
+    private var uploadAudio = true
+    private var uploadImu = true
+
+    // HFP audio capture
+    private var audioManager: AudioManager? = null
+    private var audioRecord: AudioRecord? = null
+    private var hfpConfigured = false
 
     init {
         // Initialize telemetry uplink if server is configured
@@ -231,6 +258,187 @@ class CameraManager(
             }
     }
 
+    /**
+     * Enable/disable video upload to server
+     * Video still streams from glasses and displays locally
+     */
+    fun setVideoUploadEnabled(enabled: Boolean) {
+        uploadVideo = enabled
+        Log.i(TAG, "Video upload ${if (enabled) "enabled" else "disabled"}")
+        if (_isStreaming.value) {
+            updateUploadStatus()
+        }
+    }
+
+    /**
+     * Enable/disable audio upload to server
+     * Audio still streams from glasses
+     */
+    fun setAudioUploadEnabled(enabled: Boolean) {
+        uploadAudio = enabled
+        Log.i(TAG, "Audio upload ${if (enabled) "enabled" else "disabled"}")
+        if (_isStreaming.value) {
+            updateUploadStatus()
+        }
+    }
+
+    /**
+     * Enable/disable IMU upload to server
+     * IMU still streams from glasses
+     */
+    fun setImuUploadEnabled(enabled: Boolean) {
+        uploadImu = enabled
+        Log.i(TAG, "IMU upload ${if (enabled) "enabled" else "disabled"}")
+        if (_isStreaming.value) {
+            updateUploadStatus()
+        }
+    }
+
+    /**
+     * Update status based on what's being uploaded to server
+     */
+    private fun updateUploadStatus() {
+        val uploading = mutableListOf<String>()
+        if (uploadVideo) uploading.add("Video")
+        if (uploadAudio) uploading.add("Audio")
+        if (uploadImu) uploading.add("IMU")
+
+        _status.value = if (uploading.isEmpty()) {
+            "🎥 Streaming locally (not uploading)"
+        } else {
+            "📤 Uploading: ${uploading.joinToString(" + ")}"
+        }
+    }
+
+    /**
+     * Configure HFP (Hands-Free Profile) audio route for microphone capture
+     * Must be called BEFORE starting camera stream (Meta ordering constraint)
+     *
+     * Supports both:
+     * - Android S+ (API 31+): AudioManager.setCommunicationDevice()
+     * - Android 10+ (API 29+): Legacy Bluetooth SCO
+     */
+    private suspend fun configureHfpAudio(): Boolean {
+        if (!settings.audioEnabled) return true
+        if (hfpConfigured) return true
+
+        try {
+            audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                // Android S+ (API 31+): Modern API
+                Log.i(TAG, "Configuring HFP using modern API (Android S+)")
+
+                val bluetoothDevice = audioManager?.availableCommunicationDevices?.firstOrNull { device ->
+                    device.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+                }
+
+                if (bluetoothDevice == null) {
+                    Log.w(TAG, "No Bluetooth SCO device found for HFP audio")
+                    return false
+                }
+
+                audioManager?.mode = AudioManager.MODE_IN_COMMUNICATION
+                val success = audioManager?.setCommunicationDevice(bluetoothDevice) ?: false
+
+                if (success) {
+                    Log.i(TAG, "HFP audio route configured (modern), waiting for settlement...")
+                    kotlinx.coroutines.delay(2000)
+                    hfpConfigured = true
+                    Log.i(TAG, "HFP audio route ready")
+                } else {
+                    Log.e(TAG, "Failed to set HFP communication device")
+                }
+
+                return success
+            } else {
+                // Android 10-11 (API 29-30): Legacy Bluetooth SCO API
+                Log.i(TAG, "Configuring HFP using legacy Bluetooth SCO (Android 10-11)")
+
+                audioManager?.let { am ->
+                    // Enable Bluetooth SCO
+                    am.mode = AudioManager.MODE_IN_COMMUNICATION
+                    am.startBluetoothSco()
+                    am.isBluetoothScoOn = true
+
+                    Log.i(TAG, "Bluetooth SCO started, waiting for route settlement...")
+                    // Wait for SCO connection to establish
+                    kotlinx.coroutines.delay(2000)
+
+                    // Check if SCO is connected
+                    if (am.isBluetoothScoOn) {
+                        hfpConfigured = true
+                        Log.i(TAG, "HFP audio route ready (legacy SCO)")
+                        return true
+                    } else {
+                        Log.w(TAG, "Bluetooth SCO failed to connect")
+                        return false
+                    }
+                }
+
+                return false
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error configuring HFP audio: $e", e)
+            return false
+        }
+    }
+
+    /**
+     * Start capturing audio via HFP using AudioRecord
+     */
+    private fun startHfpAudioCapture() {
+        if (!settings.audioEnabled || !hfpConfigured) return
+
+        try {
+            val sampleRate = settings.audioSampleRate
+            val channelConfig = if (settings.audioChannels == 1)
+                AudioFormat.CHANNEL_IN_MONO else AudioFormat.CHANNEL_IN_STEREO
+            val audioFormat = AudioFormat.ENCODING_PCM_16BIT
+
+            val bufferSize = AudioRecord.getMinBufferSize(sampleRate, channelConfig, audioFormat)
+
+            audioRecord = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                sampleRate,
+                channelConfig,
+                audioFormat,
+                bufferSize * 2
+            )
+
+            audioRecord?.startRecording()
+            Log.i(TAG, "HFP AudioRecord started: $sampleRate Hz, buffer=$bufferSize")
+
+            // Capture audio in background
+            coroutineScope.launch(Dispatchers.IO) {
+                val buffer = ByteArray(bufferSize)
+                var frameCount = 0
+
+                while (audioRecord?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    val bytesRead = audioRecord?.read(buffer, 0, buffer.size) ?: 0
+
+                    if (bytesRead > 0) {
+                        frameCount++
+                        if (frameCount <= 5 || frameCount % 50 == 0) {
+                            Log.i(TAG, "HFP audio frame $frameCount: $bytesRead bytes (PCM)")
+                        }
+
+                        // Send raw PCM audio directly to MediaUplink
+                        // Note: This sends PCM, not AAC - relay server needs to handle this
+                        if (uploadAudio) {
+                            val presentationTimeUs = System.nanoTime() / 1000
+                            mediaUplink?.sendAudioFrame(buffer.copyOf(bytesRead), presentationTimeUs)
+                        }
+                    }
+                }
+                Log.i(TAG, "HFP audio capture stopped after $frameCount frames")
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting HFP audio capture: $e", e)
+        }
+    }
+
     fun startStreaming() {
         val currentSession = session
         if (currentSession == null) {
@@ -244,8 +452,82 @@ class CameraManager(
             return
         }
 
+        // Check DAT permissions before starting
+        coroutineScope.launch {
+            if (!checkDatPermissions()) {
+                return@launch
+            }
+
+            // For initial DAT audio testing, HFP is disabled by default
+            // HFP should only be used as explicit fallback, not automatically
+            if (settings.audioEnabled && false) { // HFP disabled for DAT audio validation
+                Log.i(TAG, "[HFP_AUDIO] HFP fallback is disabled - using DAT in-stream audio only")
+                val hfpReady = configureHfpAudio()
+                if (hfpReady) {
+                    Log.i(TAG, "[HFP_AUDIO] HFP configured, starting camera stream...")
+                    startCameraStream()
+                } else {
+                    Log.w(TAG, "[HFP_AUDIO] HFP not available, falling back to video-only")
+                    startCameraStream()
+                }
+            } else {
+                Log.i(TAG, "[DAT_AUDIO] Starting camera stream with DAT in-stream audio")
+                startCameraStream()
+            }
+        }
+    }
+
+    /**
+     * Check required DAT permissions before starting audio-enabled stream
+     * Returns true if permissions are granted, false otherwise
+     */
+    private suspend fun checkDatPermissions(): Boolean {
+        Log.i(TAG, "[DAT_PERMISSION] Checking required DAT permissions")
+
+        // Always need CAMERA permission
+        val cameraStatus = Wearables.checkPermissionStatus(Permission.CAMERA)
+        Log.i(TAG, "[DAT_PERMISSION] Camera permission: $cameraStatus")
+
+        if (!cameraStatus.isSuccess || cameraStatus.getOrNull() != PermissionStatus.Granted) {
+            _status.value = "❌ Camera permission required. Grant in Devices tab."
+            Log.e(TAG, "[DAT_PERMISSION] Camera permission not granted")
+            return false
+        }
+
+        // Need MICROPHONE permission for audio-enabled streams
+        if (settings.audioEnabled) {
+            val micStatus = Wearables.checkPermissionStatus(Permission.MICROPHONE)
+            Log.i(TAG, "[DAT_PERMISSION] Microphone permission: $micStatus")
+
+            if (!micStatus.isSuccess || micStatus.getOrNull() != PermissionStatus.Granted) {
+                _status.value = "❌ Microphone permission required for audio. Grant in Devices tab."
+                Log.e(TAG, "[DAT_PERMISSION] Microphone permission not granted")
+                return false
+            }
+        }
+
+        Log.i(TAG, "[DAT_PERMISSION] All required permissions granted")
+        return true
+    }
+
+    private fun startCameraStream() {
+        val currentSession = session
+        if (currentSession == null) {
+            _status.value = "❌ Session not available"
+            Log.e(TAG, "[DAT_CAMERA] Session is null in startCameraStream")
+            return
+        }
+
+        // CRITICAL: Wait for session to reach STARTED state before adding camera
+        val currentState = currentSession.state.value
+        if (currentState != DeviceSessionState.STARTED) {
+            _status.value = "❌ Session not ready (state: $currentState)"
+            Log.e(TAG, "[DAT_SESSION] Cannot add camera - session state is $currentState, must be STARTED")
+            return
+        }
+
         _status.value = "Starting camera stream..."
-        Log.i(TAG, "Adding camera to session")
+        Log.i(TAG, "[DAT_CAMERA] Adding camera to session (state: $currentState)")
 
         currentSession.addCamera(
             StreamConfiguration(
@@ -255,8 +537,21 @@ class CameraManager(
                     else -> VideoQuality.MEDIUM
                 },
                 frameRate = settings.frameRate,
-                compressVideo = true  // HEVC compressed
-                // Audio configuration will be added after spike to determine actual API
+                compressVideo = true,  // HEVC compressed
+                // Try in-stream audio with SDK 1.1.0
+                audioCodec = if (settings.audioEnabled) {
+                    AudioCodec.PCM(
+                        sampleRate = when (settings.audioSampleRate) {
+                            16000 -> AudioSampleRate.RATE_16000
+                            44100 -> AudioSampleRate.RATE_44100
+                            48000 -> AudioSampleRate.RATE_48000
+                            else -> AudioSampleRate.RATE_48000
+                        },
+                        numberOfChannels = settings.audioChannels
+                    )
+                } else {
+                    null  // Video-only streaming
+                }
             )
         )
         .onSuccess { addedCamera ->
@@ -273,14 +568,20 @@ class CameraManager(
                     _isStreaming.value = (state == StreamState.STREAMING)
                     when (state) {
                         StreamState.STREAMING -> {
-                            _status.value = "🎥 Streaming!"
+                            updateUploadStatus()
                             // Start decoder when streaming begins
                             videoSurface?.let { startDecoder(it) }
+                            // Start HFP audio capture if configured
+                            if (hfpConfigured) {
+                                startHfpAudioCapture()
+                            }
                         }
                         StreamState.STOPPED, StreamState.CLOSED -> {
-                            _status.value = "Stream stopped"
+                            _status.value = "✅ Stream stopped - Ready to restart"
                             _isStreaming.value = false
-                            stopDecoder()
+                            Log.i(TAG, "Stream ended")
+                            // Don't call cleanup() here - let stopStreaming() handle it
+                            // This way session stays alive for restart
                         }
                         else -> {
                             _status.value = "Stream: $state"
@@ -289,58 +590,92 @@ class CameraManager(
                 }
             }
 
-            // Initialize media uplink and video pipeline
+            // Initialize media uplink
             initializeMediaUplink()
+
+            // Always start video pipeline (from glasses to phone)
             videoPipeline = VideoPipeline(sessionId, coroutineScope)
             videoPipeline?.start(addedStream)
 
-            // Collect from video pipeline and send to media uplink
-            coroutineScope.launch {
+            // Collect from video pipeline and send to server if upload enabled
+            videoPipelineJob = coroutineScope.launch {
                 videoPipeline?.packets?.collect { packet ->
-                    mediaUplink?.sendVideoFrame(packet)
+                    if (uploadVideo) {
+                        mediaUplink?.sendVideoFrame(packet)
+                    }
                 }
             }
 
-            // Collect video frames for display
-            coroutineScope.launch(Dispatchers.Default) {
-                Log.i(TAG, "Starting video frame collection")
+            // Always collect video frames for local display
+            videoCollectorJob = coroutineScope.launch(Dispatchers.Default) {
+                Log.i(TAG, "[DAT_CAMERA] Starting video frame collection")
                 try {
                     addedStream.videoStream.collect { frame ->
+                        // Always display locally, even if not uploading
                         handleVideoFrame(frame)
                     }
                 } catch (e: Exception) {
-                    Log.e(TAG, "Error collecting video frames", e)
+                    Log.e(TAG, "[DAT_CAMERA] Error collecting video frames", e)
                 }
-                Log.i(TAG, "Video frame collection stopped")
+                Log.i(TAG, "[DAT_CAMERA] Video frame collection stopped")
             }
 
-            // Collect audio frames if enabled
-            if (settings.audioEnabled) {
-                audioPipeline = AudioPipeline(
-                    sessionId = sessionId,
-                    sampleRate = settings.audioSampleRate,
-                    channels = settings.audioChannels
-                )
+            // Always collect audio frames from glasses
+            audioPipeline = AudioPipeline(
+                sessionId = sessionId,
+                sampleRate = settings.audioSampleRate,
+                channels = settings.audioChannels
+            )
 
-                coroutineScope.launch(Dispatchers.Default) {
-                    Log.i(TAG, "Starting audio frame collection")
-                    try {
-                        addedStream.audioStream.collect { frame ->
-                            audioPipeline?.offer(frame)
+            audioCollectorJob = coroutineScope.launch(Dispatchers.Default) {
+                Log.i(TAG, "[DAT_AUDIO] Starting audio frame collection from glasses audioStream")
+                var audioFrameCount = 0
+                try {
+                    addedStream.audioStream.collect { frame ->
+                        audioFrameCount++
+
+                        // CRITICAL: Copy buffer bytes IMMEDIATELY before SDK reuses it
+                        // Do NOT pass AudioFrame to async processing - copy first!
+                        val source = frame.buffer.duplicate() // Don't modify original position
+                        val audioBytes = ByteArray(source.remaining())
+                        source.get(audioBytes)
+
+                        if (audioFrameCount <= 5 || audioFrameCount % 50 == 0) {
+                            Log.i(TAG, "[DAT_AUDIO] Audio frame $audioFrameCount: ${audioBytes.size} bytes, pts=${frame.presentationTimeUs}us")
                         }
-                    } catch (e: Exception) {
-                        Log.e(TAG, "Error collecting audio frames", e)
-                    }
-                    Log.i(TAG, "Audio frame collection stopped")
-                }
 
-                // Emit audio_started event
-                coroutineScope.launch {
-                    emitEvent(EventNames.AUDIO_STARTED, buildJsonObject {
-                        put("sample_rate_hz", settings.audioSampleRate)
-                        put("channels", settings.audioChannels)
-                    })
+                        // Create application-owned frame data with copied bytes
+                        val frameData = AudioPipeline.AudioFrameData(
+                            presentationTimeUs = frame.presentationTimeUs,
+                            data = audioBytes,
+                            sampleRate = settings.audioSampleRate,
+                            channels = settings.audioChannels
+                        )
+
+                        // Now safe to pass to pipeline (no SDK buffer references)
+                        audioPipeline?.offer(frameData)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "[DAT_AUDIO] Error collecting audio frames", e)
                 }
+                Log.i(TAG, "[DAT_AUDIO] Audio frame collection stopped after $audioFrameCount frames")
+            }
+
+            // Collect from audio pipeline and send to server if upload enabled
+            audioPipelineJob = coroutineScope.launch {
+                audioPipeline?.frames?.collect { frameData ->
+                    if (uploadAudio) {
+                        mediaUplink?.sendAudioFrame(frameData.data, frameData.presentationTimeUs)
+                    }
+                }
+            }
+
+            // Emit audio_started event
+            coroutineScope.launch {
+                emitEvent(EventNames.AUDIO_STARTED, buildJsonObject {
+                    put("sample_rate_hz", settings.audioSampleRate)
+                    put("channels", settings.audioChannels)
+                })
             }
 
             // Monitor stream errors
@@ -357,10 +692,11 @@ class CameraManager(
                 _status.value = "❌ Failed to start stream: ${error.description}"
             }
 
-            // Start Motion/IMU if enabled
-            if (settings.imuEnabled) {
-                startMotion()
-            }
+            // Always start Motion/IMU from glasses
+            startMotion()
+
+            // Update status based on what's being uploaded
+            updateUploadStatus()
         }
         .onFailure { error, _ ->
             Log.e(TAG, "Failed to add camera: ${error.description}")
@@ -419,7 +755,11 @@ class CameraManager(
             coroutineScope.launch(start = CoroutineStart.UNDISPATCHED) {
                 try {
                     addedMotion.samples.collect { sample ->
-                        motionPipeline?.offer(sample)
+                        // Only upload to server if enabled
+                        if (uploadImu) {
+                            motionPipeline?.offer(sample)
+                        }
+                        // Always count samples locally
                         _imuCount.value = _imuCount.value + 1
                     }
                 } catch (e: Exception) {
@@ -484,20 +824,125 @@ class CameraManager(
         )
     }
 
+    /**
+     * Stop HFP audio capture and reset audio manager
+     */
+    private fun stopHfpAudio() {
+        try {
+            audioRecord?.stop()
+            audioRecord?.release()
+            audioRecord = null
+
+            audioManager?.let { am ->
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    // Modern API cleanup
+                    am.clearCommunicationDevice()
+                } else {
+                    // Legacy SCO cleanup
+                    am.isBluetoothScoOn = false
+                    am.stopBluetoothSco()
+                }
+                am.mode = AudioManager.MODE_NORMAL
+            }
+            audioManager = null
+            hfpConfigured = false
+
+            Log.i(TAG, "HFP audio stopped and cleaned up")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping HFP audio: $e", e)
+        }
+    }
+
     fun stopStreaming() {
-        camera?.stop()
+        Log.i(TAG, "[DAT_CAMERA] Stopping streaming")
         _status.value = "Stopping stream..."
-        Log.i(TAG, "Stopping camera")
+
+        // CRITICAL: Cancel collector jobs FIRST to stop data flow
+        audioCollectorJob?.cancel()
+        audioCollectorJob = null
+        videoCollectorJob?.cancel()
+        videoCollectorJob = null
+        audioPipelineJob?.cancel()
+        audioPipelineJob = null
+        videoPipelineJob?.cancel()
+        videoPipelineJob = null
+        Log.i(TAG, "[DAT_AUDIO] Cancelled all collector jobs")
+
+        // Stop camera stream (this will stop SDK from delivering frames)
+        camera?.stop()
+
+        // Stop motion
+        motion?.stop()
+
+        // Stop HFP audio
+        stopHfpAudio()
+
+        // Clean up pipelines and uplinks but KEEP session alive
+        stopDecoder()
+
+        // Stop pipelines (this closes their channels)
+        motionPipeline?.stop()
+        motionPipeline = null
+
+        audioPipeline?.stop()
+        audioPipeline = null
+
+        videoPipeline?.stop()
+        videoPipeline = null
+
+        // Stop uplinks
+        mediaUplink?.stop()
+        mediaUplink = null
+
+        // Clear camera and stream references
+        camera = null
+        stream = null
+        motion = null
+
+        // Keep session alive for restart!
+        // session = null  // DON'T clear this
+
+        _isStreaming.value = false
+        _frameCount.value = 0
+        _imuCount.value = 0
+
+        _status.value = "✅ Stopped - Ready to restart"
+        Log.i(TAG, "[DAT_CAMERA] Streaming stopped, session still active, ready for restart")
     }
 
     fun stopSession() {
-        session?.stop()
-        _status.value = "Stopping session..."
         Log.i(TAG, "Stopping session")
+        _status.value = "Stopping session..."
+
+        // Stop streaming first if active
+        if (_isStreaming.value) {
+            stopStreaming()
+        }
+
+        // Stop and cleanup session
+        session?.stop()
+
+        // cleanup() will be called by session state monitor when it reaches STOPPED
+
+        _status.value = "✅ Session stopped - Start new session to stream"
+        Log.i(TAG, "Session stopped")
     }
 
     private fun cleanup() {
+        Log.i(TAG, "[DAT_CAMERA] Starting cleanup")
+
+        // Cancel all collector jobs
+        audioCollectorJob?.cancel()
+        audioCollectorJob = null
+        videoCollectorJob?.cancel()
+        videoCollectorJob = null
+        audioPipelineJob?.cancel()
+        audioPipelineJob = null
+        videoPipelineJob?.cancel()
+        videoPipelineJob = null
+
         stopDecoder()
+        stopHfpAudio()
 
         // Stop pipelines
         motionPipeline?.stop()
@@ -523,6 +968,8 @@ class CameraManager(
         _isStreaming.value = false
         _frameCount.value = 0
         _imuCount.value = 0
+
+        Log.i(TAG, "[DAT_CAMERA] Cleanup completed")
     }
 
     fun shutdown() {

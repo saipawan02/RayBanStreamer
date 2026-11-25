@@ -1,18 +1,20 @@
 package com.glassesstream.capture
 
 import android.util.Log
-import com.meta.wearable.dat.camera.types.AudioFrame
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
-import java.nio.ByteBuffer
 
 /**
  * Audio capture pipeline
  * Following TECH-02 section 6.2
  *
  * Captures 16-bit PCM audio from SDK and prepares for uplink.
- * For Plan B WebSocket approach, we send raw PCM or AAC-encoded frames.
+ * For Plan B WebSocket approach, we send raw PCM frames.
+ *
+ * IMPORTANT: This pipeline accepts application-owned AudioFrameData,
+ * not SDK AudioFrame objects. Buffer copying must happen in the collector
+ * before data enters this pipeline to avoid SDK buffer lifetime issues.
  */
 class AudioPipeline(
     private val sessionId: String,
@@ -21,16 +23,18 @@ class AudioPipeline(
 ) {
     private val TAG = "AudioPipeline"
 
-    // Incoming audio frame channel
-    private val audioChannel = Channel<AudioFrame>(
+    // Incoming audio frame channel - now accepts owned data, not SDK objects
+    private val audioChannel = Channel<AudioFrameData>(
         capacity = 256,
         onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST
     )
 
     private var frameCount = 0
+    private var droppedFrames = 0
 
     /**
      * Audio frame data with metadata
+     * This is application-owned data with copied bytes
      */
     data class AudioFrameData(
         val presentationTimeUs: Long,
@@ -41,33 +45,31 @@ class AudioPipeline(
 
     /**
      * Offer an audio frame from the SDK collector
+     * Accepts application-owned AudioFrameData with already-copied bytes
      */
-    fun offer(frame: AudioFrame) {
-        audioChannel.trySend(frame)
+    fun offer(frameData: AudioFrameData) {
+        val result = audioChannel.trySend(frameData)
+        if (result.isFailure) {
+            droppedFrames++
+            if (droppedFrames % 10 == 0) {
+                Log.w(TAG, "Dropped $droppedFrames audio frames due to queue overflow")
+            }
+        }
     }
 
     /**
      * Flow of audio frames ready for uplink
+     * Data is already copied, just forward it
      */
     val frames: Flow<AudioFrameData> = flow {
-        for (frame in audioChannel) {
+        for (frameData in audioChannel) {
             frameCount++
 
-            // Copy the buffer data immediately (SDK buffers may be reused)
-            val buffer = frame.buffer
-            val data = ByteArray(buffer.remaining())
-            buffer.get(data)
-
             if (frameCount <= 10 || frameCount % 100 == 0) {
-                Log.d(TAG, "Audio frame $frameCount: ${data.size} bytes, pts=${frame.presentationTimeUs}us")
+                Log.d(TAG, "Audio frame $frameCount: ${frameData.data.size} bytes, pts=${frameData.presentationTimeUs}us")
             }
 
-            emit(AudioFrameData(
-                presentationTimeUs = frame.presentationTimeUs,
-                data = data,
-                sampleRate = sampleRate,
-                channels = channels
-            ))
+            emit(frameData)
         }
     }
 
@@ -76,6 +78,6 @@ class AudioPipeline(
      */
     fun stop() {
         audioChannel.close()
-        Log.i(TAG, "Audio pipeline stopped, processed $frameCount frames")
+        Log.i(TAG, "Audio pipeline stopped, processed $frameCount frames, dropped $droppedFrames frames")
     }
 }
