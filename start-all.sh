@@ -90,6 +90,11 @@ LOG_LEVEL=info
 EOF
 fi
 
+# Load environment variables
+set -a
+source .env
+set +a
+
 # Check if already running
 if pgrep -f "uvicorn app.main:app.*8000" > /dev/null; then
     echo -e "${YELLOW}⚠ Telemetry server already running${NC}"

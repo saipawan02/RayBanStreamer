@@ -10,9 +10,11 @@ TECH-01 section 7: Plan B uplink
 
 import asyncio
 import logging
+import os
 import struct
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 
@@ -27,8 +29,9 @@ log = logging.getLogger(__name__)
 
 app = FastAPI(title="Media Relay")
 
-# Active FFmpeg processes by session_id
+# Active FFmpeg processes and pipes by session_id
 ffmpeg_processes: dict[str, subprocess.Popen] = {}
+session_pipes: dict[str, dict[str, any]] = {}  # {session_id: {'video': fd, 'audio': fd, 'video_path': path, 'audio_path': path}}
 
 
 @app.get("/health")
@@ -46,12 +49,15 @@ async def media_websocket(
     Receive binary video/audio frames and relay to FFmpeg -> MediaMTX
 
     Binary frame format (16-byte header + payload):
-    - byte 0: stream type (1=video HEVC, 2=audio AAC)
+    - byte 0: stream type (1=video HEVC, 2=audio PCM 16-bit LE)
     - byte 1: flags (bit 0 = keyframe)
     - bytes 2-3: reserved
     - bytes 4-11: presentation_time_us (little-endian int64)
     - bytes 12-15: payload length (little-endian int32)
     - bytes 16+: payload
+
+    Audio format: 16-bit PCM, little-endian, 48kHz, mono
+    (DAT SDK delivers PCM directly, no AAC encoding)
     """
 
     # TODO: Validate token against environment variable
@@ -97,18 +103,25 @@ async def media_websocket(
 
             if stream_type == 1:  # Video HEVC
                 video_frames += 1
-                # Write to FFmpeg stdin (video pipe)
+                # Write to video pipe
                 try:
-                    ffmpeg.stdin.write(payload)
-                    ffmpeg.stdin.flush()
+                    pipes = session_pipes.get(session_id)
+                    if pipes and pipes['video_fd']:
+                        os.write(pipes['video_fd'], payload)
                 except (BrokenPipeError, OSError) as e:
-                    log.error(f"FFmpeg video pipe error: {e}")
+                    log.error(f"Video pipe error: {e}")
                     break
 
-            elif stream_type == 2:  # Audio AAC
+            elif stream_type == 2:  # Audio PCM (16-bit, 48kHz, mono)
                 audio_frames += 1
-                # TODO: Handle audio if needed
-                # For now, video-only
+                # Write to audio pipe
+                try:
+                    pipes = session_pipes.get(session_id)
+                    if pipes and pipes['audio_fd']:
+                        os.write(pipes['audio_fd'], payload)
+                except (BrokenPipeError, OSError) as e:
+                    log.error(f"Audio pipe error: {e}")
+                    # Don't break on audio errors, continue with video
 
             if frames_received % 100 == 0:
                 log.info(f"Session {session_id}: {video_frames} video, {audio_frames} audio frames")
@@ -125,59 +138,166 @@ async def media_websocket(
 
 async def start_ffmpeg(session_id: str) -> Optional[subprocess.Popen]:
     """
-    Start FFmpeg to remux HEVC from stdin and publish to MediaMTX via RTSP
+    Start FFmpeg with named pipes for video and audio
 
     FFmpeg command:
-    - Input: raw H265 stream from stdin
-    - Output: RTSP to MediaMTX (no re-encoding, just remuxing)
+    - Video input: raw HEVC from named pipe
+    - Audio input: raw PCM (16-bit, 48kHz, mono) from named pipe
+    - Output: RTSP to MediaMTX (video copied, audio encoded to AAC)
     """
 
-    # FFmpeg command: read raw HEVC from stdin, output to RTSP
+    # Create named pipes for video and audio
+    video_pipe = f'/tmp/video_{session_id}.pipe'
+    audio_pipe = f'/tmp/audio_{session_id}.pipe'
+
+    try:
+        # Remove old pipes if they exist
+        for pipe in [video_pipe, audio_pipe]:
+            if os.path.exists(pipe):
+                os.remove(pipe)
+
+        # Create new named pipes
+        os.mkfifo(video_pipe)
+        os.mkfifo(audio_pipe)
+        log.info(f"Created named pipes: {video_pipe}, {audio_pipe}")
+
+    except Exception as e:
+        log.error(f"Failed to create named pipes: {e}")
+        return None
+
+    # FFmpeg command with both video and audio inputs
+    # Output via RTMP to MediaMTX (most reliable for publishing)
+    # Allow FFmpeg to properly detect HEVC stream parameters
     cmd = [
         'ffmpeg',
-        '-f', 'hevc',              # Input format: raw HEVC
-        '-i', 'pipe:0',            # Read from stdin
-        '-c:v', 'copy',            # Don't re-encode
-        '-f', 'rtsp',              # Output format
-        '-rtsp_transport', 'tcp',  # Use TCP for RTSP
-        'rtsp://127.0.0.1:8554/glasses'
+        # Video input (raw HEVC) - allow time to detect parameters
+        '-probesize', '5000000',      # 5MB probing buffer
+        '-analyzeduration', '2000000',  # 2 seconds analysis
+        '-fflags', '+genpts',     # Generate PTS if missing
+        '-f', 'hevc',
+        '-i', video_pipe,
+        # Audio input (16-bit PCM, 48kHz, mono)
+        '-f', 's16le',           # 16-bit signed PCM little-endian
+        '-ar', '48000',          # Sample rate 48kHz
+        '-ac', '1',              # Mono (1 channel)
+        '-i', audio_pipe,
+        # Video: re-encode HEVC to H.264 (necessary because raw HEVC lacks size metadata)
+        '-c:v', 'libx264',
+        '-preset', 'ultrafast',
+        '-tune', 'zerolatency',
+        # Audio: encode PCM to AAC
+        '-c:a', 'aac',
+        '-b:a', '128k',          # 128 kbps audio bitrate
+        # Low latency settings
+        '-flush_packets', '1',
+        # Output to RTMP (MediaMTX accepts RTMP publishing)
+        '-f', 'flv',
+        'rtmp://127.0.0.1:1935/glasses'
     ]
 
     log.info(f"Starting FFmpeg for session {session_id}")
     log.debug(f"FFmpeg command: {' '.join(cmd)}")
 
     try:
+        # Start FFmpeg process with stderr logging
+        stderr_log = f'/tmp/ffmpeg_{session_id}.log'
         proc = subprocess.Popen(
             cmd,
-            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0  # Unbuffered
+            stderr=open(stderr_log, 'w'),
+            bufsize=0
         )
 
-        # Give it a moment to start
-        await asyncio.sleep(0.5)
+        # Open pipes for writing using non-blocking mode initially, then switch to blocking
+        # This avoids deadlock where FFmpeg and relay both wait for each other
+        def open_pipes():
+            import time
+            max_wait = 10  # seconds
+            start_time = time.time()
+
+            try:
+                # Try opening with O_NONBLOCK first, retry until FFmpeg opens for reading
+                log.info(f"Waiting for FFmpeg to open pipes...")
+                video_fd = None
+                audio_fd = None
+
+                while (time.time() - start_time) < max_wait:
+                    try:
+                        if video_fd is None:
+                            video_fd = os.open(video_pipe, os.O_WRONLY | os.O_NONBLOCK)
+                            log.info(f"Video pipe opened")
+                            # Clear O_NONBLOCK after successful open
+                            import fcntl
+                            flags = fcntl.fcntl(video_fd, fcntl.F_GETFL)
+                            fcntl.fcntl(video_fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+
+                        if audio_fd is None:
+                            audio_fd = os.open(audio_pipe, os.O_WRONLY | os.O_NONBLOCK)
+                            log.info(f"Audio pipe opened")
+                            # Clear O_NONBLOCK after successful open
+                            import fcntl
+                            flags = fcntl.fcntl(audio_fd, fcntl.F_GETFL)
+                            fcntl.fcntl(audio_fd, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+
+                        if video_fd is not None and audio_fd is not None:
+                            break
+                    except OSError as e:
+                        if e.errno != 6:  # ENXIO - no reader yet
+                            raise
+                        time.sleep(0.1)
+
+                if video_fd is None or audio_fd is None:
+                    raise Exception("Timeout waiting for FFmpeg to open pipes")
+
+                session_pipes[session_id] = {
+                    'video_fd': video_fd,
+                    'audio_fd': audio_fd,
+                    'video_path': video_pipe,
+                    'audio_path': audio_pipe,
+                    'stderr_log': stderr_log
+                }
+                log.info(f"Both pipes opened successfully for session {session_id}")
+            except Exception as e:
+                log.error(f"Failed to open pipes: {e}", exc_info=True)
+                if video_fd is not None:
+                    os.close(video_fd)
+                if audio_fd is not None:
+                    os.close(audio_fd)
+
+        # Open pipes in background thread
+        threading.Thread(target=open_pipes, daemon=True).start()
+
+        # Give FFmpeg time to start and open pipes
+        await asyncio.sleep(2.0)
 
         if proc.poll() is not None:
             # Process already exited
-            stderr = proc.stderr.read().decode() if proc.stderr else ""
+            with open(stderr_log, 'r') as f:
+                stderr = f.read()
             log.error(f"FFmpeg failed to start: {stderr}")
+            # Clean up pipes
+            for pipe in [video_pipe, audio_pipe]:
+                if os.path.exists(pipe):
+                    os.remove(pipe)
             return None
 
-        log.info(f"FFmpeg started (PID {proc.pid}) for session {session_id}")
+        log.info(f"FFmpeg started (PID {proc.pid}) with audio support for session {session_id}, stderr: {stderr_log}")
         return proc
 
     except Exception as e:
         log.error(f"Failed to start FFmpeg: {e}")
+        # Clean up pipes
+        for pipe in [video_pipe, audio_pipe]:
+            if os.path.exists(pipe):
+                os.remove(pipe)
         return None
 
 
 async def stop_ffmpeg(session_id: str):
-    """Stop FFmpeg process for a session"""
+    """Stop FFmpeg process and clean up pipes for a session"""
     proc = ffmpeg_processes.pop(session_id, None)
     if proc:
         try:
-            proc.stdin.close()
             proc.terminate()
             # Wait up to 5 seconds for graceful shutdown
             try:
@@ -188,6 +308,35 @@ async def stop_ffmpeg(session_id: str):
             log.info(f"FFmpeg stopped for session {session_id}")
         except Exception as e:
             log.error(f"Error stopping FFmpeg: {e}")
+
+    # Clean up pipes
+    pipes = session_pipes.pop(session_id, None)
+    if pipes:
+        try:
+            # Close file descriptors
+            if pipes.get('video_fd'):
+                os.close(pipes['video_fd'])
+                log.debug(f"Closed video pipe FD for session {session_id}")
+            if pipes.get('audio_fd'):
+                os.close(pipes['audio_fd'])
+                log.debug(f"Closed audio pipe FD for session {session_id}")
+
+            # Remove pipe files
+            if pipes.get('video_path') and os.path.exists(pipes['video_path']):
+                os.remove(pipes['video_path'])
+                log.debug(f"Removed video pipe: {pipes['video_path']}")
+            if pipes.get('audio_path') and os.path.exists(pipes['audio_path']):
+                os.remove(pipes['audio_path'])
+                log.debug(f"Removed audio pipe: {pipes['audio_path']}")
+
+            # Remove stderr log
+            if pipes.get('stderr_log') and os.path.exists(pipes['stderr_log']):
+                os.remove(pipes['stderr_log'])
+                log.debug(f"Removed FFmpeg stderr log: {pipes['stderr_log']}")
+
+            log.info(f"Cleaned up pipes for session {session_id}")
+        except Exception as e:
+            log.error(f"Error cleaning up pipes: {e}")
 
 
 if __name__ == "__main__":
