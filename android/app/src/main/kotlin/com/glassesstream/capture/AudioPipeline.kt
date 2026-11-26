@@ -32,6 +32,10 @@ class AudioPipeline(
     private var frameCount = 0
     private var droppedFrames = 0
 
+    // Phase 2 Task 8: Audio startup timing
+    private val startTime = System.currentTimeMillis()
+    private var firstFrameTime: Long? = null
+
     /**
      * Audio frame data with metadata
      * This is application-owned data with copied bytes
@@ -48,6 +52,17 @@ class AudioPipeline(
      * Accepts application-owned AudioFrameData with already-copied bytes
      */
     fun offer(frameData: AudioFrameData) {
+        // Phase 2 Task 8: Log first frame timing
+        if (firstFrameTime == null) {
+            firstFrameTime = System.currentTimeMillis()
+            val elapsedMs = firstFrameTime!! - startTime
+            Log.i(TAG, "=== PHASE 2 TASK 8: AUDIO STARTUP TIMING ===")
+            Log.i(TAG, "First audio frame offered +${elapsedMs}ms after AudioPipeline creation")
+            Log.i(TAG, "Frame size: ${frameData.data.size} bytes")
+            Log.i(TAG, "Sample rate: ${frameData.sampleRate} Hz")
+            Log.i(TAG, "Channels: ${frameData.channels}")
+        }
+
         val result = audioChannel.trySend(frameData)
         if (result.isFailure) {
             droppedFrames++
