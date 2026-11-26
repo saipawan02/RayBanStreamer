@@ -594,7 +594,7 @@ class CameraManager(
             initializeMediaUplink()
 
             // Always start video pipeline (from glasses to phone)
-            videoPipeline = VideoPipeline(sessionId, coroutineScope)
+            videoPipeline = VideoPipeline(context, sessionId, coroutineScope)
             videoPipeline?.start(addedStream)
 
             // Collect from video pipeline and send to server if upload enabled

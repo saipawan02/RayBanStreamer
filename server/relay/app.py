@@ -9,6 +9,8 @@ TECH-01 section 7: Plan B uplink
 """
 
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import struct
@@ -32,6 +34,10 @@ app = FastAPI(title="Media Relay")
 # Active FFmpeg processes and pipes by session_id
 ffmpeg_processes: dict[str, subprocess.Popen] = {}
 session_pipes: dict[str, dict[str, any]] = {}  # {session_id: {'video': fd, 'audio': fd, 'video_path': path, 'audio_path': path}}
+
+# Phase 2 Task 4: Integrity validation
+session_manifests: dict[str, any] = {}  # {session_id: file handle}
+session_sequences: dict[str, int] = {}  # {session_id: sequence_number}
 
 
 @app.get("/health")
@@ -64,6 +70,17 @@ async def media_websocket(
 
     await websocket.accept()
     log.info(f"Media WebSocket opened: session {session_id}")
+
+    # Phase 2 Task 4: Open manifest file for integrity validation
+    manifest_path = f'/tmp/relay_video_manifest_{session_id[:8]}.jsonl'
+    try:
+        manifest_file = open(manifest_path, 'w')
+        session_manifests[session_id] = manifest_file
+        session_sequences[session_id] = 0
+        log.info(f"Opened relay manifest: {manifest_path}")
+    except Exception as e:
+        log.error(f"Failed to open manifest file: {e}")
+        manifest_file = None
 
     # Start FFmpeg process for this session
     ffmpeg = await start_ffmpeg(session_id)
@@ -103,6 +120,33 @@ async def media_websocket(
 
             if stream_type == 1:  # Video HEVC
                 video_frames += 1
+
+                # Phase 2 Task 4: Calculate checksum and write manifest entry
+                session_sequences[session_id] = session_sequences.get(session_id, 0) + 1
+                sequence = session_sequences[session_id]
+                checksum = hashlib.sha256(payload).hexdigest()
+
+                manifest_file = session_manifests.get(session_id)
+                if manifest_file:
+                    try:
+                        is_keyframe = bool(flags & 0x01)
+                        entry = {
+                            "session": session_id,
+                            "sequence": sequence,
+                            "size": len(payload),
+                            "sha256": checksum,
+                            "timestamp": pts_us,
+                            "isKeyframe": is_keyframe
+                        }
+                        manifest_file.write(json.dumps(entry) + '\n')
+                        manifest_file.flush()
+
+                        # Log first 5 and every 50th frame
+                        if sequence <= 5 or sequence % 50 == 0:
+                            log.debug(f"Received frame seq={sequence} size={len(payload)} sha256={checksum[:16]}...")
+                    except Exception as e:
+                        log.error(f"Error writing manifest entry: {e}")
+
                 # Write to video pipe
                 try:
                     pipes = session_pipes.get(session_id)
@@ -131,6 +175,17 @@ async def media_websocket(
     except Exception as e:
         log.error(f"Error in WebSocket handler: {e}", exc_info=True)
     finally:
+        # Phase 2 Task 4: Close manifest file
+        manifest_file = session_manifests.pop(session_id, None)
+        if manifest_file:
+            try:
+                manifest_file.close()
+                total_seq = session_sequences.get(session_id, 0)
+                log.info(f"Relay manifest closed: {total_seq} video frames logged")
+            except Exception as e:
+                log.error(f"Error closing manifest: {e}")
+        session_sequences.pop(session_id, None)
+
         # Stop FFmpeg
         await stop_ffmpeg(session_id)
         log.info(f"Session {session_id} ended. Received {frames_received} frames total")
@@ -167,13 +222,10 @@ async def start_ffmpeg(session_id: str) -> Optional[subprocess.Popen]:
 
     # FFmpeg command with both video and audio inputs
     # Output via RTMP to MediaMTX (most reliable for publishing)
-    # Allow FFmpeg to properly detect HEVC stream parameters
+    # Note: HEVC stream should contain SPS/PPS with size info
     cmd = [
         'ffmpeg',
-        # Video input (raw HEVC) - allow time to detect parameters
-        '-probesize', '5000000',      # 5MB probing buffer
-        '-analyzeduration', '2000000',  # 2 seconds analysis
-        '-fflags', '+genpts',     # Generate PTS if missing
+        # Video input (raw HEVC)
         '-f', 'hevc',
         '-i', video_pipe,
         # Audio input (16-bit PCM, 48kHz, mono)
@@ -181,10 +233,8 @@ async def start_ffmpeg(session_id: str) -> Optional[subprocess.Popen]:
         '-ar', '48000',          # Sample rate 48kHz
         '-ac', '1',              # Mono (1 channel)
         '-i', audio_pipe,
-        # Video: re-encode HEVC to H.264 (necessary because raw HEVC lacks size metadata)
-        '-c:v', 'libx264',
-        '-preset', 'ultrafast',
-        '-tune', 'zerolatency',
+        # Video: copy HEVC directly (no re-encoding)
+        '-c:v', 'copy',
         # Audio: encode PCM to AAC
         '-c:a', 'aac',
         '-b:a', '128k',          # 128 kbps audio bitrate

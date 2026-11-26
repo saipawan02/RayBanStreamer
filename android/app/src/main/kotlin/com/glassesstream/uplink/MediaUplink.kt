@@ -113,6 +113,8 @@ class MediaUplink(
         })
     }
 
+    private var codecConfigSent = 0
+
     /**
      * Send a video frame using Plan B binary protocol
      */
@@ -124,6 +126,19 @@ class MediaUplink(
 
         if (_state.value != ConnectionState.Connected) {
             return
+        }
+
+        // PHASE 1 DIAGNOSTIC: Log codec config frames
+        if (packet.isCodecConfig) {
+            codecConfigSent++
+            Log.i(TAG, "=== SENDING CODEC CONFIG FRAME #$codecConfigSent ===")
+            Log.i(TAG, "  Size: ${packet.data.size} bytes")
+            Log.i(TAG, "  First 32 bytes: ${packet.data.take(32).joinToString(" ") { "%02x".format(it) }}")
+        }
+
+        // PHASE 2 TASK 4: Log integrity data for first 5 and last 5 frames
+        if (framesSent < 5 || (framesSent % 50 == 0)) {
+            Log.d(TAG, "Sending frame seq=${packet.sequence} size=${packet.data.size} sha256=${packet.sha256.take(16)}...")
         }
 
         try {
@@ -210,6 +225,9 @@ class MediaUplink(
         webSocket?.close(1000, "Session ended")
         webSocket = null
         _state.value = ConnectionState.Disconnected
-        Log.i(TAG, "Media uplink stopped. Sent $framesSent frames total")
+        Log.i(TAG, "=== MEDIA UPLINK SUMMARY ===")
+        Log.i(TAG, "Total frames sent: $framesSent")
+        Log.i(TAG, "Codec config frames: $codecConfigSent")
+        Log.i(TAG, "Total bytes: ${bytesSent / (1024.0 * 1024.0)} MB")
     }
 }

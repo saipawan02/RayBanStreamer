@@ -9,7 +9,8 @@ apiAddress: :9997
 metrics: no
 rtmp: yes
 rtmpAddress: :1935
-hls: no
+hls: yes
+hlsAddress: :8888
 webrtc: no
 
 rtsp: yes
