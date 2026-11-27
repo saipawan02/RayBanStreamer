@@ -5,6 +5,7 @@ services:
     container_name: mediamtx
     restart: unless-stopped
     network_mode: host                    # simplest for UDP (SRT) and RTSP
+    user: "1000:1000"                     # Run as sai-pawan to avoid root-owned recordings
     env_file: .env                        # holds MTX_PATHS_GLASSES_SRTPUBLISHPASSPHRASE (never committed)
     volumes:
       - ./mediamtx.yml:/mediamtx.yml:ro

@@ -34,15 +34,18 @@ else
 fi
 
 # Relay Service
-echo -n "Relay Service:           "
-if pgrep -f "uvicorn app:app.*8001" > /dev/null; then
-    PID=$(pgrep -f "uvicorn app:app.*8001")
-    echo -e "${GREEN}✓ Running (PID: $PID)${NC}"
+echo -n "Relay Service (Fixed):   "
+if pgrep -f "python.*app_task8.py" > /dev/null; then
+    PID=$(pgrep -f "python.*app_task8.py")
+    echo -e "${GREEN}✓ Running app_task8.py (PID: $PID)${NC}"
     # Test health endpoint
     if curl -s http://localhost:8001/health > /dev/null 2>&1; then
         HEALTH=$(curl -s http://localhost:8001/health)
         echo "  Health: $HEALTH"
     fi
+elif pgrep -f "uvicorn app:app.*8001" > /dev/null; then
+    PID=$(pgrep -f "uvicorn app:app.*8001")
+    echo -e "${YELLOW}⚠ Running old app.py (PID: $PID) - should use app_task8.py${NC}"
 else
     echo -e "${RED}✗ Not running${NC}"
 fi
@@ -108,9 +111,9 @@ echo "=================================================="
 echo "  Quick Actions"
 echo "=================================================="
 echo ""
-echo "View stream:        vlc rtsp://localhost:8554/glasses"
+echo "View stream:        ffplay rtsp://localhost:8554/glasses"
 echo "Test pattern:       ./tools/synthetic_publisher.sh localhost test-passphrase"
 echo "Telemetry logs:     tail -f /tmp/telemetry.log"
-echo "Relay logs:         tail -f /tmp/relay.log"
+echo "Relay logs:         tail -f /tmp/task8_relay.log"
 echo "MediaMTX logs:      docker logs -f mediamtx"
 echo ""

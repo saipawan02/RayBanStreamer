@@ -125,7 +125,7 @@ else
 fi
 echo ""
 
-# 3. Start Relay Service
+# 3. Start Relay Service (with all bug fixes)
 echo "=================================================="
 echo "Starting Relay Service (video/audio)..."
 echo "=================================================="
@@ -141,17 +141,14 @@ else
 fi
 
 # Check if already running
-if pgrep -f "uvicorn app:app.*8001" > /dev/null; then
+if pgrep -f "python.*app_task8.py" > /dev/null; then
     echo -e "${YELLOW}⚠ Relay service already running${NC}"
 else
-    nohup python3 -m uvicorn app:app \
-        --host 0.0.0.0 \
-        --port 8001 \
-        --log-level info \
-        > /tmp/relay.log 2>&1 &
+    nohup python3 app_task8.py \
+        > /tmp/task8_relay.log 2>&1 &
 
     RELAY_PID=$!
-    echo $RELAY_PID > /tmp/relay.pid
+    echo $RELAY_PID > /tmp/task8_relay.pid
 
     sleep 2
 
@@ -159,37 +156,40 @@ else
     if ps -p $RELAY_PID > /dev/null; then
         echo -e "${GREEN}✓ Relay service started (PID: $RELAY_PID)${NC}"
         echo "  WebSocket: ws://localhost:8001/media/<session_id>"
-        echo "  Logs: /tmp/relay.log"
+        echo "  Logs: /tmp/task8_relay.log"
+        echo "  Version: app_task8.py (with FFmpeg dual-input fixes)"
     else
         echo -e "${RED}✗ Failed to start relay service${NC}"
-        cat /tmp/relay.log
+        cat /tmp/task8_relay.log
         exit 1
     fi
 fi
 echo ""
 
-# 4. Start VLC to view the stream
+# 4. Start FFplay to view the stream
 echo "=================================================="
-echo "Starting VLC Player (stream viewer)..."
+echo "Starting FFplay (stream viewer)..."
 echo "=================================================="
 
-if ! command -v vlc &> /dev/null; then
-    echo -e "${YELLOW}⚠ VLC not found - install with: sudo apt install vlc${NC}"
+if ! command -v ffplay &> /dev/null; then
+    echo -e "${YELLOW}⚠ FFplay not found - install with: sudo apt install ffmpeg${NC}"
 else
-    # Check if VLC is already running with this stream
-    if pgrep -f "vlc.*rtsp://localhost:8554/glasses" > /dev/null; then
-        echo -e "${YELLOW}⚠ VLC already viewing stream${NC}"
+    # Check if ffplay is already running with this stream
+    if pgrep -f "ffplay.*rtsp://localhost:8554/glasses" > /dev/null; then
+        echo -e "${YELLOW}⚠ FFplay already viewing stream${NC}"
     else
-        # Start VLC in background to view the RTSP stream
-        vlc rtsp://localhost:8554/glasses > /dev/null 2>&1 &
-        VLC_PID=$!
+        # Start ffplay in background to view the RTSP stream
+        ffplay -window_title "Ray-Ban Glasses Stream" rtsp://localhost:8554/glasses > /dev/null 2>&1 &
+        FFPLAY_PID=$!
+        echo $FFPLAY_PID > /tmp/ffplay.pid
         sleep 1
 
-        if ps -p $VLC_PID > /dev/null; then
-            echo -e "${GREEN}✓ VLC started (PID: $VLC_PID)${NC}"
+        if ps -p $FFPLAY_PID > /dev/null; then
+            echo -e "${GREEN}✓ FFplay started (PID: $FFPLAY_PID)${NC}"
             echo "  Viewing: rtsp://localhost:8554/glasses"
+            echo "  Window: Ray-Ban Glasses Stream"
         else
-            echo -e "${YELLOW}⚠ VLC may not have started (this is OK if no stream yet)${NC}"
+            echo -e "${YELLOW}⚠ FFplay may not have started (this is OK if no stream yet)${NC}"
         fi
     fi
 fi
@@ -206,8 +206,8 @@ echo ""
 echo "Services:"
 echo -e "  ${GREEN}✓${NC} MediaMTX       - Port 8554 (RTSP), 8890 (SRT)"
 echo -e "  ${GREEN}✓${NC} Telemetry      - Port 8000 (WebSocket)"
-echo -e "  ${GREEN}✓${NC} Relay          - Port 8001 (WebSocket)"
-echo -e "  ${GREEN}✓${NC} VLC Player     - Viewing RTSP stream"
+echo -e "  ${GREEN}✓${NC} Relay (Fixed)  - Port 8001 (WebSocket, app_task8.py)"
+echo -e "  ${GREEN}✓${NC} FFplay Viewer  - Viewing RTSP stream"
 echo ""
 echo "=================================================="
 echo "  📱 ANDROID APP CONFIGURATION"
@@ -229,8 +229,8 @@ echo "  Sessions:    $SCRIPT_DIR/data/sessions/"
 echo "  Recordings:  $SCRIPT_DIR/data/recordings/glasses/"
 echo ""
 echo "View stream on this machine:"
-echo "  vlc rtsp://localhost:8554/glasses"
 echo "  ffplay rtsp://localhost:8554/glasses"
+echo "  mpv rtsp://localhost:8554/glasses"
 echo ""
 echo "Check status:"
 echo "  ./check-services.sh"

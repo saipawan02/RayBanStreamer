@@ -29,22 +29,35 @@ echo ""
 
 # Stop Relay Service
 echo "Stopping Relay Service..."
-if [ -f /tmp/relay.pid ]; then
-    PID=$(cat /tmp/relay.pid)
+if [ -f /tmp/task8_relay.pid ]; then
+    PID=$(cat /tmp/task8_relay.pid)
     if ps -p $PID > /dev/null 2>&1; then
         kill $PID
         echo "✓ Relay service stopped (PID: $PID)"
     fi
-    rm /tmp/relay.pid
+    rm /tmp/task8_relay.pid
 else
-    # Fallback: kill by name
-    pkill -f "uvicorn app:app.*8001" && echo "✓ Relay service stopped" || echo "  (not running)"
+    # Fallback: kill by name (both old and new versions)
+    pkill -f "python.*app_task8.py" && echo "✓ Relay service (app_task8.py) stopped" || true
+    pkill -f "uvicorn app:app.*8001" && echo "✓ Relay service (app.py) stopped" || echo "  (not running)"
 fi
 echo ""
 
-# Stop VLC
-echo "Stopping VLC Player..."
-pkill -f "vlc.*rtsp://localhost:8554/glasses" 2>/dev/null && echo "✓ VLC stopped" || echo "  (not running)"
+# Stop FFplay
+echo "Stopping FFplay viewer..."
+if [ -f /tmp/ffplay.pid ]; then
+    PID=$(cat /tmp/ffplay.pid)
+    if ps -p $PID > /dev/null 2>&1; then
+        kill $PID
+        echo "✓ FFplay stopped (PID: $PID)"
+    fi
+    rm /tmp/ffplay.pid
+else
+    pkill -f "ffplay.*rtsp://localhost:8554/glasses" 2>/dev/null && echo "✓ FFplay stopped" || echo "  (not running)"
+fi
+
+# Also stop VLC if someone started it manually
+pkill -f "vlc.*rtsp://localhost:8554/glasses" 2>/dev/null && echo "✓ VLC stopped" || true
 echo ""
 
 # Stop any synthetic publishers
